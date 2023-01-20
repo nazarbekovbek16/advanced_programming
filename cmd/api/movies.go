@@ -3,10 +3,21 @@ package main
 import (
 	"advanced_programming/internal/data"
 	"advanced_programming/internal/validator"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 )
+
+type Actors struct {
+	ID      int64
+	Name    string
+	Surname string
+}
+type ActorModel struct {
+	DB *sql.DB
+}
 
 func (app *application) createMovieHandler(w http.ResponseWriter, r *http.Request) {
 	var input struct {
@@ -80,23 +91,39 @@ func (app *application) updateMovieHandler(w http.ResponseWriter, r *http.Reques
 			app.serverErrorResponse(w, r, err)
 		}
 		return
+	}
+	if r.Header.Get("X-Expected-Version") != "" {
+		if strconv.FormatInt(int64(movie.Version), 32) != r.Header.Get("X-Expected-Version") {
+			app.editConflictResponse(w, r)
+			return
+		}
+	}
 
-	}
 	var input struct {
-		Title   string       `json:"title"`
-		Year    int32        `json:"year"`
-		Runtime data.Runtime `json:"runtime"`
-		Genres  []string     `json:"genres"`
+		Title   *string       `json:"title"`
+		Year    *int32        `json:"year"`
+		Runtime *data.Runtime `json:"runtime"`
+		Genres  []string      `json:"genres"`
 	}
+
 	err = app.readJSON(w, r, &input)
 	if err != nil {
 		app.badRequestResponse(w, r, err)
 		return
 	}
-	movie.Title = input.Title
-	movie.Year = input.Year
-	movie.Runtime = input.Runtime
-	movie.Genres = input.Genres
+	if input.Title != nil {
+		movie.Title = *input.Title
+	}
+
+	if input.Year != nil {
+		movie.Year = *input.Year
+	}
+	if input.Runtime != nil {
+		movie.Runtime = *input.Runtime
+	}
+	if input.Genres != nil {
+		movie.Genres = input.Genres
+	}
 	v := validator.New()
 	if data.ValidateMovie(v, movie); !v.Valid() {
 		app.failedValidationResponse(w, r, v.Errors)
@@ -104,7 +131,12 @@ func (app *application) updateMovieHandler(w http.ResponseWriter, r *http.Reques
 	}
 	err = app.models.Movies.Update(movie)
 	if err != nil {
-		app.serverErrorResponse(w, r, err)
+		switch {
+		case errors.Is(err, data.ErrEditConflict):
+			app.editConflictResponse(w, r)
+		default:
+			app.serverErrorResponse(w, r, err)
+		}
 		return
 	}
 	err = app.writeJSON(w, http.StatusOK, envelope{"movie": movie}, nil)
@@ -134,3 +166,66 @@ func (app *application) deleteMovieHandler(w http.ResponseWriter, r *http.Reques
 		app.serverErrorResponse(w, r, err)
 	}
 }
+func (app *application) listMoviesHandler(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Title  string
+		Genres []string
+		data.Filters
+	}
+	v := validator.New()
+	qs := r.URL.Query()
+	input.Title = app.readString(qs, "title", "")
+	input.Genres = app.readCSV(qs, "genres", []string{})
+	input.Filters.Page = app.readInt(qs, "page", 1, v)
+	input.Filters.PageSize = app.readInt(qs, "page_size", 20, v)
+	input.Filters.Sort = app.readString(qs, "sort", "id")
+	input.Filters.SortSafelist = []string{"id", "title", "year", "runtime", "-id", "-title", "-year", "-runtime"}
+	if data.ValidateFilters(v, input.Filters); !v.Valid() {
+		app.failedValidationResponse(w, r, v.Errors)
+		return
+	}
+	movies, metadata, err := app.models.Movies.GetAll(input.Title, input.Genres, input.Filters)
+	if err != nil {
+		app.serverErrorResponse(w, r, err)
+		return
+	}
+	err = app.writeJSON(w, http.StatusOK, envelope{"movies": movies, "metadata": metadata}, nil)
+	if err != nil {
+		app.serverErrorResponse(w, r, err)
+	}
+}
+
+// func (app *application) createDirectorHandler(w http.ResponseWriter, r *http.Request) {
+
+// 	var input struct {
+// 		Name    string   `json:"name"`
+// 		Surname string   `json:"surname"`
+// 		Awards  []string `json:"awards"`
+// 	}
+
+// 	err := app.readJSON(w, r, &input) //non-nil pointer as the target decode destination
+// 	if err != nil {
+// 		app.errorResponse(w, r, http.StatusBadRequest, err.Error())
+// 	}
+
+// 	director := &data.Director{
+// 		Name:    input.Name,
+// 		Surname: input.Surname,
+// 		Awards:  input.Awards,
+// 	}
+
+// 	err = app.models.Director.InsertDir(director)
+// 	if err != nil {
+// 		app.serverErrorResponse(w, r, err)
+// 		return
+// 	}
+
+// 	headers := make(http.Header)
+// 	headers.Set("Location", fmt.Sprintf("/v2/directors/#{director.ID"))
+
+// 	err = app.writeJSON(w, http.StatusCreated, envelope{"director": director}, headers)
+// 	if err != nil {
+// 		app.serverErrorResponse(w, r, err)
+// 	}
+
+// }
